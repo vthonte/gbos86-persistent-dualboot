@@ -1,0 +1,13 @@
+# Upstream clone and build artifacts
+repo/
+build/
+lapis/
+*.img
+*.zip
+*.tar.xz
+*.log
+
+# Temporary test/mount artifacts
+*.fd
+tmp/
+scratch/
