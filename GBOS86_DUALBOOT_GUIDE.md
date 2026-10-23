@@ -242,21 +242,36 @@ sudo cp usb/out/BOOTX64.EFI /boot/efi/EFI/gbos/BOOTX64.EFI
 # 2. Get EFI Partition UUID
 EFI_UUID=$(sudo blkid -s UUID -o value /dev/sda2)
 
-# 3. Add GRUB menu entry to /etc/grub.d/40_custom
+# 3. Add GRUB menu entries to /etc/grub.d/40_custom
+# (Provides auto-detected entry plus generic fallbacks for older Intel, modern Intel Xe, and safe-graphics)
 sudo bash -c "cat << EOF >> /etc/grub.d/40_custom
 
-menuentry \"Googlebook OS (gbOS86)\" --class android --class os {
+menuentry \"Googlebook OS (gbOS86) [Auto-Detected / Native]\" --class android --class os {
+    insmod part_gpt
+    insmod fat
+    search --no-floppy --fs-uuid --set=root $EFI_UUID
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp module_blacklist=i915
+}
+
+menuentry \"Googlebook OS (gbOS86) [Modern Intel Xe Graphics]\" --class android --class os {
+    insmod part_gpt
+    insmod fat
+    search --no-floppy --fs-uuid --set=root $EFI_UUID
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp module_blacklist=i915
+}
+
+menuentry \"Googlebook OS (gbOS86) [Legacy Intel i915 Graphics]\" --class android --class os {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $EFI_UUID
     linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp
 }
 
-menuentry \"Googlebook OS (gbOS86) [Safe Graphics / nomodeset]\" --class android --class os {
+menuentry \"Googlebook OS (gbOS86) [Safe Graphics - nomodeset]\" --class android --class os {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $EFI_UUID
-    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp nomodeset
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp nomodeset module_blacklist=i915
 }
 
 menuentry \"Googlebook OS (gbOS86) [UEFI Chainloader]\" --class android --class os {
@@ -271,7 +286,7 @@ EOF"
 sudo update-grub
 
 # 4. Register UEFI NVRAM boot entry
-sudo efibootmgr -c -d /dev/sda -p 2 -L "Googlebook OS (gbOS86)" -l '\EFI\gbos\BOOTX64.EFI' -u "ibt=off i8042.nopnp"
+sudo efibootmgr -c -d /dev/sda -p 2 -L "Googlebook OS (gbOS86)" -l '\EFI\gbos\BOOTX64.EFI' -u "ibt=off i8042.nopnp module_blacklist=i915"
 ```
 
 ---

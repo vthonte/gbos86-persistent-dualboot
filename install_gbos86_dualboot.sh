@@ -365,26 +365,36 @@ fi
 # Tune gbos.cfg for persistent booting & hardware
 sed -i 's/^MODE=.*/MODE=boot/' "$MNT_SYS/gbos/gbos.cfg"
 
-# Intel Arc / Core Ultra (Meteor Lake / Arrow Lake / Lunar Lake) check:
+# Generic base kernel parameters (universally safe across all x86 PCs)
+EXTRA_CMDLINE="ibt=off i8042.nopnp"
+
+# Detect GPU architecture dynamically:
+INTEL_VGA_ID=$(lspci -n 2>/dev/null | grep -E '03[0-9a-f]{2}: 8086:' | awk '{print $3}' | cut -d: -f2 | head -n1 | tr '[:upper:]' '[:lower:]' || true)
+
 if echo "$CPU_INFO $VGA_INFO" | grep -Ei 'ultra|meteor|lunar|arrow|arc|battlemage|xe' >/dev/null; then
-    echo -e "${YELLOW}Detected modern Intel Core Ultra / Arc GPU: Applying xe driver parameters and disabling legacy i915...${NC}"
+    echo -e "${YELLOW}Detected modern Intel Core Ultra / Arc GPU (PCI ID: ${INTEL_VGA_ID:-unknown}): Configuring xe driver...${NC}"
     sed -i 's/^LOAD_I915=.*/LOAD_I915=0/' "$MNT_SYS/gbos/gbos.cfg"
     sed -i 's/^#XE_PARAMS=.*/XE_PARAMS="enable_psr=0 enable_fbc=0"/' "$MNT_SYS/gbos/gbos.cfg"
     sed -i 's/^XE_PARAMS=.*/XE_PARAMS="enable_psr=0 enable_fbc=0"/' "$MNT_SYS/gbos/gbos.cfg"
     sed -i 's/^EXTRA_SLEEP=.*/EXTRA_SLEEP=2/' "$MNT_SYS/gbos/gbos.cfg"
 
-    # Disable i915.ko so coldplug modprobe never attempts to load it on Meteor Lake
+    # Disable i915.ko on modern hardware so coldplug modprobe never attempts to load it
     find "$MNT_SYS/gbos/modules" -name "i915.ko" -exec mv {} {}.disabled \; 2>/dev/null || true
-    # Remove 7D55 alias pointing to i915 in modules.alias
-    sed -i '/alias pci:v00008086d00007D55.* i915/d' "$MNT_SYS/gbos/modules/lib/modules/6.18.21-gbos-whl/modules.alias" 2>/dev/null || true
-    sed -i '/alias pci:v00008086d00007D55.* i915/d' "$MNT_SYS/gbos/modules/lib/modules/6.18.21-gbos-whl+/modules.alias" 2>/dev/null || true
+    if [[ -n "$INTEL_VGA_ID" ]]; then
+        sed -i "/alias pci:v00008086d0000${INTEL_VGA_ID^^}.* i915/d" "$MNT_SYS/gbos/modules/lib/modules/"*/modules.alias 2>/dev/null || true
+        EXTRA_CMDLINE="$EXTRA_CMDLINE module_blacklist=i915 i915.force_probe=!$INTEL_VGA_ID xe.force_probe=$INTEL_VGA_ID"
+    else
+        EXTRA_CMDLINE="$EXTRA_CMDLINE module_blacklist=i915"
+    fi
 elif echo "$VGA_INFO" | grep -Ei 'amd|radeon' >/dev/null; then
     echo -e "${YELLOW}Detected AMD GPU: Configuring software Vulkan rendering...${NC}"
     sed -i 's/^LOAD_I915=.*/LOAD_I915=0/' "$MNT_SYS/gbos/gbos.cfg"
     sed -i 's/^GPU_SOFTWARE=.*/GPU_SOFTWARE=auto/' "$MNT_SYS/gbos/gbos.cfg"
     sed -i 's/^GPU_VULKAN=.*/GPU_VULKAN=auto/' "$MNT_SYS/gbos/gbos.cfg"
+    EXTRA_CMDLINE="$EXTRA_CMDLINE module_blacklist=i915"
 else
-    echo "Detected standard/legacy Intel GPU: Keeping default i915 probe."
+    echo "Detected standard/legacy Intel GPU: Keeping default i915 driver enabled."
+    sed -i 's/^LOAD_I915=.*/LOAD_I915=1/' "$MNT_SYS/gbos/gbos.cfg"
 fi
 
 sync
@@ -417,14 +427,28 @@ EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
 if ! grep -q "Googlebook OS (gbOS86)" /etc/grub.d/40_custom 2>/dev/null; then
     cat << EOF >> /etc/grub.d/40_custom
 
-menuentry "Googlebook OS (gbOS86)" --class android --class os {
+menuentry "Googlebook OS (gbOS86) [Auto-Detected]" --class android --class os {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $EFI_UUID
-    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp module_blacklist=i915 i915.force_probe=!7d55 xe.force_probe=7d55
+    linux /EFI/gbos/BOOTX64.EFI $EXTRA_CMDLINE
 }
 
-menuentry "Googlebook OS (gbOS86) [Safe Graphics / nomodeset]" --class android --class os {
+menuentry "Googlebook OS (gbOS86) [Modern Intel Xe Graphics]" --class android --class os {
+    insmod part_gpt
+    insmod fat
+    search --no-floppy --fs-uuid --set=root $EFI_UUID
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp module_blacklist=i915
+}
+
+menuentry "Googlebook OS (gbOS86) [Legacy Intel i915 Graphics]" --class android --class os {
+    insmod part_gpt
+    insmod fat
+    search --no-floppy --fs-uuid --set=root $EFI_UUID
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp
+}
+
+menuentry "Googlebook OS (gbOS86) [Safe Graphics - nomodeset]" --class android --class os {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $EFI_UUID
@@ -450,8 +474,8 @@ update-grub
 echo -e "\n${CYAN}[8/8] Registering UEFI NVRAM boot entry with efibootmgr...${NC}"
 EFI_PART_NUM=$(echo "$EFI_PART" | grep -o '[0-9]*$')
 if ! efibootmgr | grep -q "Googlebook OS (gbOS86)"; then
-    efibootmgr -c -d "$TARGET_DISK" -p "$EFI_PART_NUM" -L "Googlebook OS (gbOS86)" -l '\EFI\gbos\BOOTX64.EFI' -u "ibt=off i8042.nopnp module_blacklist=i915 i915.force_probe=!7d55 xe.force_probe=7d55"
-    echo "Registered UEFI NVRAM entry: Googlebook OS (gbOS86)"
+    efibootmgr -c -d "$TARGET_DISK" -p "$EFI_PART_NUM" -L "Googlebook OS (gbOS86)" -l '\EFI\gbos\BOOTX64.EFI' -u "$EXTRA_CMDLINE"
+    echo "Registered UEFI NVRAM entry: Googlebook OS (gbOS86) ($EXTRA_CMDLINE)"
 else
     echo "UEFI NVRAM entry already registered."
 fi
