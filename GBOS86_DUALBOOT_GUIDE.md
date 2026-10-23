@@ -68,6 +68,28 @@ During hardware implementation and simulation on modern PC hardware (specificall
 * **WARNING:** `install.sh` wipes the partition table of the internal NVMe disk (`/dev/nvme0n1`), destroying Windows, Linux, and all partition tables.
 * By using dedicated partitions on an external drive (e.g. Samsung Fit Plus) or existing free space, your internal SSD remains untouched and 100% safe.
 
+### Finding 6: Google SetupWizard OTA Loop ("Something went wrong" on 38 MB update)
+* **Symptom:** During initial boot setup, after connecting to Wi-Fi, the setup wizard downloads a ~38 MB update and fails with:
+  ```text
+  Something went wrong.
+  Restart | Reset update
+  ```
+* **Root Cause:**
+  1. `com.google.android.setupwizard/.update.OtaUpdateActivity` invokes `update_engine`.
+  2. `update_engine` fails with:
+     ```text
+     update_engine: [ERROR:dynamic_partition_control_android.cc(1221)] Device file /dev/block/by-name/boot_a does not exist.
+     android.os.ServiceSpecificException: Failed to get partition device for boot (code 1)
+     ```
+  3. More importantly, official Google OTA packages are compiled for proprietary Google Chromebook hardware. Generic PCs must not flash official Google OTAs, as they overwrite custom PC kernels and patches.
+* **Solution:**
+  1. In `hook.sh`, map fake block symlinks for `boot_a`, `boot_b`, `vendor_boot_a`, `vendor_boot_b`.
+  2. In `gbos.rc`, automatically disable `OtaUpdateActivity`, stop `update_engine`, and mark `user_setup_complete 1` and `device_provisioned 1`:
+     ```rc
+     service gbos_setupfix /system/bin/sh -c "sleep 1; pm disable com.google.android.setupwizard/.update.OtaUpdateActivity; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; stop update_engine; setprop ro.setupwizard.mode DISABLED"
+     ```
+  3. This completely bypasses the broken update screen and boots directly into the Googlebook OS desktop launcher, where Wi-Fi, Google Account sign-in, and the Play Store operate normally.
+
 ---
 
 ## 3. Storage Layout for Non-Destructive Dual-Boot
