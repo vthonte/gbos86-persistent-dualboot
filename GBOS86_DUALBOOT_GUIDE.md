@@ -84,11 +84,11 @@ During hardware implementation and simulation on modern PC hardware (specificall
   3. More importantly, official Google OTA packages are compiled for proprietary Google Chromebook hardware. Generic PCs must not flash official Google OTAs, as they overwrite custom PC kernels and patches.
 * **Solution:**
   1. In `hook.sh`, map fake block symlinks for `boot_a`, `boot_b`, `vendor_boot_a`, `vendor_boot_b`.
-  2. In `gbos.rc`, automatically disable `OtaUpdateActivity`, stop `update_engine`, and mark `user_setup_complete 1` and `device_provisioned 1`:
+  2. In `gbos.rc`, selectively disable `com.google.android.setupwizard/.update.OtaUpdateActivity` and stop `update_engine`:
      ```rc
-     service gbos_setupfix /system/bin/sh -c "sleep 1; pm disable com.google.android.setupwizard/.update.OtaUpdateActivity; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; stop update_engine; setprop ro.setupwizard.mode DISABLED"
+     service gbos_setupfix /system/bin/sh -c "sleep 1; pm disable com.google.android.setupwizard/.update.OtaUpdateActivity; stop update_engine; setprop sys.setupwizard.disable_ota true"
      ```
-  3. This completely bypasses the broken update screen and boots directly into the Googlebook OS desktop launcher, where Wi-Fi, Google Account sign-in, and the Play Store operate normally.
+  3. This cleanly skips only the broken OTA update check while **keeping the rest of the Setup Wizard intact**, advancing directly to the **Phone Setup (QR Code) onboarding screen**, Google Account transfer, and region/language selection.
 
 ---
 
