@@ -84,11 +84,15 @@ During hardware implementation and simulation on modern PC hardware (specificall
   3. More importantly, official Google OTA packages are compiled for proprietary Google Chromebook hardware. Generic PCs must not flash official Google OTAs, as they overwrite custom PC kernels and patches.
 * **Solution:**
   1. In `hook.sh`, map fake block symlinks for `boot_a`, `boot_b`, `vendor_boot_a`, `vendor_boot_b`.
-  2. In `gbos.rc`, selectively disable `com.google.android.setupwizard/.update.OtaUpdateActivity` and stop `update_engine`:
+  2. Permanently disable background system OTAs by overriding `update_engine` and disabling Google Play Services' update activities:
      ```rc
-     service gbos_setupfix /system/bin/sh -c "sleep 1; pm disable com.google.android.setupwizard/.update.OtaUpdateActivity; stop update_engine; setprop sys.setupwizard.disable_ota true"
+     service update_engine /system/bin/sh -c "exit 0"
+         disabled
+         override
+
+     service gbos_setupfix /system/bin/sh -c "sleep 1; pm disable com.google.android.setupwizard/.update.OtaUpdateActivity 2>/dev/null; pm disable com.google.android.gms/.update.SystemUpdateService 2>/dev/null; pm disable com.google.android.gms/.update.SystemUpdateActivity 2>/dev/null; settings put global ota_disable_automatic_update 1; settings put global auto_system_update 0; stop update_engine; setprop sys.setupwizard.disable_ota true"
      ```
-  3. This cleanly skips only the broken OTA update check while **keeping the rest of the Setup Wizard intact**, advancing directly to the **Phone Setup (QR Code) onboarding screen**, Google Account transfer, and region/language selection.
+  3. This completely disables Google system OTA downloads both during the setup wizard and permanently in the future, while preserving the **Phone Setup (QR Code) onboarding screen**, Google Play Store app updates, and normal user flow.
 
 ---
 
