@@ -417,12 +417,26 @@ if ! grep -q "Googlebook OS (gbOS86)" /etc/grub.d/40_custom 2>/dev/null; then
 menuentry "Googlebook OS (gbOS86)" --class android --class os {
     insmod part_gpt
     insmod fat
+    search --no-floppy --fs-uuid --set=root $EFI_UUID
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp
+}
+
+menuentry "Googlebook OS (gbOS86) [Safe Graphics / nomodeset]" --class android --class os {
+    insmod part_gpt
+    insmod fat
+    search --no-floppy --fs-uuid --set=root $EFI_UUID
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp nomodeset
+}
+
+menuentry "Googlebook OS (gbOS86) [UEFI Chainloader]" --class android --class os {
+    insmod part_gpt
+    insmod fat
     insmod chain
     search --no-floppy --fs-uuid --set=root $EFI_UUID
     chainloader /EFI/gbos/BOOTX64.EFI
 }
 EOF
-    echo "Added gbOS86 menuentry to /etc/grub.d/40_custom."
+    echo "Added gbOS86 menuentries to /etc/grub.d/40_custom."
 else
     echo "GRUB entry already present in /etc/grub.d/40_custom."
 fi
@@ -433,8 +447,8 @@ update-grub
 echo -e "\n${CYAN}[8/8] Registering UEFI NVRAM boot entry with efibootmgr...${NC}"
 EFI_PART_NUM=$(echo "$EFI_PART" | grep -o '[0-9]*$')
 if ! efibootmgr | grep -q "Googlebook OS (gbOS86)"; then
-    efibootmgr -c -d "$TARGET_DISK" -p "$EFI_PART_NUM" -L "Googlebook OS (gbOS86)" -l '\EFI\gbos\BOOTX64.EFI'
-    echo "Registered UEFI NVRAM entry: Googlebook OS (gbOS86)"
+    efibootmgr -c -d "$TARGET_DISK" -p "$EFI_PART_NUM" -L "Googlebook OS (gbOS86)" -l '\EFI\gbos\BOOTX64.EFI' -u "ibt=off i8042.nopnp"
+    echo "Registered UEFI NVRAM entry: Googlebook OS (gbOS86) with ibt=off i8042.nopnp"
 else
     echo "UEFI NVRAM entry already registered."
 fi

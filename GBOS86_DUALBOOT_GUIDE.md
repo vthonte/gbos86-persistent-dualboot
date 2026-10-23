@@ -37,13 +37,17 @@ During hardware implementation and simulation on modern PC hardware (specificall
   Fatal exception in interrupt
   Kernel panic ! please reboot your computer
   ```
-* **Root Cause:** By default, upstream `gbos.cfg` has `LOAD_I915=1`. The legacy `i915.ko` driver was designed for Intel Gen 9 through Gen 11/12 (UHD/Iris). Modern Intel Core Ultra (Meteor Lake, Arrow Lake, Lunar Lake) with Intel Arc Graphics (Xe-LPG architecture) are **incompatible** with `i915` register access and require the modern `xe.ko` kernel driver. Probing `i915` causes a null dereference or unhandled interrupt panic.
-* **Solution:** In `/gbos/gbos.cfg` on the `GBOSSYS` partition:
-  ```sh
-  LOAD_I915=0
-  XE_PARAMS="enable_psr=0 enable_fbc=0"
-  EXTRA_SLEEP=2
-  ```
+* **Root Causes:**
+  1. **Intel Arc Graphics vs Legacy Driver:** By default, upstream `gbos.cfg` has `LOAD_I915=1`. The legacy `i915.ko` driver was designed for Intel Gen 9 through Gen 11/12 (UHD/Iris). Modern Intel Core Ultra (Meteor Lake, Arrow Lake, Lunar Lake) with Intel Arc Graphics (Xe-LPG architecture) are **incompatible** with `i915` register access and require the modern `xe.ko` kernel driver. Probing `i915` causes a null dereference or unhandled interrupt panic.
+  2. **Intel Hardware IBT (Indirect Branch Tracking / CET):** The kernel was compiled with `CONFIG_X86_KERNEL_IBT=y`. Intel Core Ultra processors feature hardware CET/IBT which verifies that indirect branch targets hit valid `ENDBR64` instructions. When KernelSU patches the kernel system call table (`sys_call_table`, `x64_sys_call`, `ni_syscall 134`), indirect jumps through these hooked pointers trigger a CPU hardware Control Protection (`#CP`) exception, causing an immediate kernel panic.
+* **Solution:**
+  1. In `/gbos/gbos.cfg` on `GBOSSYS`:
+     ```sh
+     LOAD_I915=0
+     XE_PARAMS="enable_psr=0 enable_fbc=0"
+     EXTRA_SLEEP=2
+     ```
+  2. Pass `ibt=off i8042.nopnp` to the kernel via GRUB (`linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp`) and `efibootmgr -u "ibt=off i8042.nopnp"`.
 
 ### Finding 3: Upstream Release Module Path Discrepancy
 * **Symptom:** Wi-Fi, Bluetooth, and sound modules fail to load; `hwdetect.txt` logs module loading errors.
@@ -244,6 +248,20 @@ sudo bash -c "cat << EOF >> /etc/grub.d/40_custom
 menuentry \"Googlebook OS (gbOS86)\" --class android --class os {
     insmod part_gpt
     insmod fat
+    search --no-floppy --fs-uuid --set=root $EFI_UUID
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp
+}
+
+menuentry \"Googlebook OS (gbOS86) [Safe Graphics / nomodeset]\" --class android --class os {
+    insmod part_gpt
+    insmod fat
+    search --no-floppy --fs-uuid --set=root $EFI_UUID
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp nomodeset
+}
+
+menuentry \"Googlebook OS (gbOS86) [UEFI Chainloader]\" --class android --class os {
+    insmod part_gpt
+    insmod fat
     insmod chain
     search --no-floppy --fs-uuid --set=root $EFI_UUID
     chainloader /EFI/gbos/BOOTX64.EFI
@@ -253,7 +271,7 @@ EOF"
 sudo update-grub
 
 # 4. Register UEFI NVRAM boot entry
-sudo efibootmgr -c -d /dev/sda -p 2 -L "Googlebook OS (gbOS86)" -l '\EFI\gbos\BOOTX64.EFI'
+sudo efibootmgr -c -d /dev/sda -p 2 -L "Googlebook OS (gbOS86)" -l '\EFI\gbos\BOOTX64.EFI' -u "ibt=off i8042.nopnp"
 ```
 
 ---
