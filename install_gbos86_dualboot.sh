@@ -365,8 +365,34 @@ fi
 # Tune gbos.cfg for persistent booting & hardware
 sed -i 's/^MODE=.*/MODE=boot/' "$MNT_SYS/gbos/gbos.cfg"
 
+# Mask SetupWizard APK directories so Android skips initial setup and launches Desktop directly
+if ! grep -q "empty_suw" "$MNT_SYS/gbos/hook.sh" 2>/dev/null; then
+    sed -i '/# Fake crossystem/i # Mask SetupWizard APK directories so Android skips initial setup\nmkdir -p /tmp/empty_suw\nfor suw_dir in /new/product/priv-app/*SetupWizard* /new/system_ext/priv-app/*SetupWizard* /new/product/priv-app/*setupwizard* /new/system_ext/priv-app/*setupwizard*; do\n  if [ -d "$suw_dir" ]; then\n    mount --bind /tmp/empty_suw "$suw_dir" \&\& log "hook: masked $suw_dir with empty dir"\n  fi\ndone\n' "$MNT_SYS/gbos/hook.sh"
+fi
+
+# Ensure gbos_skip_setup and update_engine override are registered in hook.sh
+if ! grep -q "gbos_skip_setup" "$MNT_SYS/gbos/hook.sh" 2>/dev/null; then
+    sed -i '/start gbos_audiodiag/i \    start gbos_skip_setup' "$MNT_SYS/gbos/hook.sh"
+    cat << 'SUW_EOF' >> "$MNT_SYS/gbos/hook.sh"
+
+# Permanently disable update_engine (system A/B OTA updater) so Google OTAs never run
+service update_engine /system/bin/sh -c "exit 0"
+    user root
+    group root
+    disabled
+    override
+
+# Skip SetupWizard completely and launch desktop
+service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; stop update_engine; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+SUW_EOF
+fi
+
 # Generic base kernel parameters (universally safe across all x86 PCs)
-EXTRA_CMDLINE="ibt=off i8042.nopnp"
+EXTRA_CMDLINE="ibt=off i8042.nopnp androidboot.setupwizard.mode=DISABLED"
 
 # Detect GPU architecture dynamically:
 INTEL_VGA_ID=$(lspci -n 2>/dev/null | grep -E '03[0-9a-f]{2}: 8086:' | awk '{print $3}' | cut -d: -f2 | head -n1 | tr '[:upper:]' '[:lower:]' || true)
@@ -438,21 +464,21 @@ menuentry "Googlebook OS (gbOS86) [Modern Intel Xe Graphics]" --class android --
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $EFI_UUID
-    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp module_blacklist=i915
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp module_blacklist=i915 androidboot.setupwizard.mode=DISABLED
 }
 
 menuentry "Googlebook OS (gbOS86) [Legacy Intel i915 Graphics]" --class android --class os {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $EFI_UUID
-    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp androidboot.setupwizard.mode=DISABLED
 }
 
 menuentry "Googlebook OS (gbOS86) [Safe Graphics - nomodeset]" --class android --class os {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $EFI_UUID
-    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp nomodeset module_blacklist=i915
+    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp nomodeset module_blacklist=i915 androidboot.setupwizard.mode=DISABLED
 }
 
 menuentry "Googlebook OS (gbOS86) [UEFI Chainloader]" --class android --class os {

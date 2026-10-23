@@ -68,31 +68,30 @@ During hardware implementation and simulation on modern PC hardware (specificall
 * **WARNING:** `install.sh` wipes the partition table of the internal NVMe disk (`/dev/nvme0n1`), destroying Windows, Linux, and all partition tables.
 * By using dedicated partitions on an external drive (e.g. Samsung Fit Plus) or existing free space, your internal SSD remains untouched and 100% safe.
 
-### Finding 6: Google SetupWizard OTA Loop ("Something went wrong" on 38 MB update)
-* **Symptom:** During initial boot setup, after connecting to Wi-Fi, the setup wizard downloads a ~38 MB update and fails with:
+### Finding 6: Bypassing Initial Setup Wizard & OTA Update Loop
+* **Symptom:** During initial boot setup, after connecting to Wi-Fi, the setup wizard downloads a ~38 MB OTA update and fails with:
   ```text
   Something went wrong.
   Restart | Reset update
   ```
-* **Root Cause:**
-  1. `com.google.android.setupwizard/.update.OtaUpdateActivity` invokes `update_engine`.
-  2. `update_engine` fails with:
-     ```text
-     update_engine: [ERROR:dynamic_partition_control_android.cc(1221)] Device file /dev/block/by-name/boot_a does not exist.
-     android.os.ServiceSpecificException: Failed to get partition device for boot (code 1)
+  If OTA services are disabled in place, the wizard can hang indefinitely on the checking/downloading screen with no skip option.
+* **Root Cause & Architectural Discovery:**
+  1. `com.google.android.setupwizard/.update.OtaUpdateActivity` invokes `update_engine`. Official Google OTA packages are compiled for proprietary Google hardware; generic PCs must not flash official Google OTAs, as they overwrite custom PC kernels and patches.
+  2. **Multi-User Headless Architecture:** Googlebook OS runs Android in a headless multi-user model: **User 0** is the headless system service user, while **User 10** is the interactive desktop session. Standard setup completion commands targeting only user 0 leave User 10 unprovisioned and trapped in SetupWizard.
+* **Complete Multi-Layer Setup Wizard Bypass:**
+  1. **Physical APK Masking (`hook.sh`):** Bind-mounts an empty directory `/tmp/empty_suw` over `/new/product/priv-app/*SetupWizard*` and `/new/system_ext/priv-app/*SetupWizard*` before Android starts, preventing `PackageManagerService` from registering SetupWizard.
+  2. **Kernel Command Line Flag:** Passes `androidboot.setupwizard.mode=DISABLED` in GRUB and UEFI NVRAM, which instructs Android's `ActivityTaskManager` to skip OOBE.
+  3. **Direct Provisioning on Disk & Init:** Pre-provisions `device_provisioned = 1` and `user_setup_complete = 1` for both User 0 and User 10 in `settings_global.xml` and `settings_secure.xml`, with `gbos_skip_setup` in `hook.sh` as an init fallback:
+     ```rc
+     service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; stop update_engine; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
      ```
-  3. More importantly, official Google OTA packages are compiled for proprietary Google Chromebook hardware. Generic PCs must not flash official Google OTAs, as they overwrite custom PC kernels and patches.
-* **Solution:**
-  1. In `hook.sh`, map fake block symlinks for `boot_a`, `boot_b`, `vendor_boot_a`, `vendor_boot_b`.
-  2. Permanently disable background system OTAs by overriding `update_engine` and disabling Google Play Services' update activities:
+  4. **Direct Desktop Launch:** Automatically launches `NexusLauncher` (`com.google.android.apps.nexuslauncher/.NexusLauncherActivity`) into User 10's session, taking the user directly to the Googlebook OS desktop home screen.
+  5. **Permanent OTA Disable:** Overrides `service update_engine` with a disabled dummy service to permanently prevent system updates in the background:
      ```rc
      service update_engine /system/bin/sh -c "exit 0"
          disabled
          override
-
-     service gbos_setupfix /system/bin/sh -c "sleep 1; pm disable com.google.android.setupwizard/.update.OtaUpdateActivity 2>/dev/null; pm disable com.google.android.gms/.update.SystemUpdateService 2>/dev/null; pm disable com.google.android.gms/.update.SystemUpdateActivity 2>/dev/null; settings put global ota_disable_automatic_update 1; settings put global auto_system_update 0; stop update_engine; setprop sys.setupwizard.disable_ota true"
      ```
-  3. This completely disables Google system OTA downloads both during the setup wizard and permanently in the future, while preserving the **Phone Setup (QR Code) onboarding screen**, Google Play Store app updates, and normal user flow.
 
 ---
 
