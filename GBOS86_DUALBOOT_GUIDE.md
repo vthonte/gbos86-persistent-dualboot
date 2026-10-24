@@ -81,17 +81,56 @@ During hardware implementation and simulation on modern PC hardware (specificall
 * **Complete Multi-Layer Setup Wizard Bypass:**
   1. **Physical APK Masking (`hook.sh`):** Bind-mounts an empty directory `/tmp/empty_suw` over `/new/product/priv-app/*SetupWizard*` and `/new/system_ext/priv-app/*SetupWizard*` before Android starts, preventing `PackageManagerService` from registering SetupWizard.
   2. **Kernel Command Line Flag:** Passes `androidboot.setupwizard.mode=DISABLED` in GRUB and UEFI NVRAM, which instructs Android's `ActivityTaskManager` to skip OOBE.
-  3. **Direct Provisioning on Disk & Init:** Pre-provisions `device_provisioned = 1` and `user_setup_complete = 1` for both User 0 and User 10 in `settings_global.xml` and `settings_secure.xml`, with `gbos_skip_setup` in `hook.sh` as an init fallback:
-     ```rc
-     service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; stop update_engine; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
-     ```
+  3. **Direct Provisioning on Disk & Init:** Pre-provisions `device_provisioned = 1` and `user_setup_complete = 1` for both User 0 and User 10 in `settings_global.xml` and `settings_secure.xml`, with `gbos_skip_setup` in `hook.sh` as an init fallback.
   4. **Direct Desktop Launch:** Automatically launches `NexusLauncher` (`com.google.android.apps.nexuslauncher/.NexusLauncherActivity`) into User 10's session, taking the user directly to the Googlebook OS desktop home screen.
-  5. **Permanent OTA Disable:** Overrides `service update_engine` with a disabled dummy service to permanently prevent system updates in the background:
-     ```rc
-     service update_engine /system/bin/sh -c "exit 0"
-         disabled
-         override
-     ```
+  5. **Safe OTA Suppression:** Physical masking of SetupWizard directories prevents OTA triggers. Do NOT override `update_engine` with a dummy script (`exit 0`), as Google Play Services (`com.google.android.gms`) relies on the `android.os.IUpdateEngine` Binder interface; overriding it causes a perpetual `Fatal Exception: Failed to find update_engine` crash loop.
+
+### Finding 7: Crash Loops from ChromeOS Hardware Daemons on Standard Laptops
+* **Symptom:** Constant background crash loops every 5 seconds logged in logcat, high idle CPU usage, rapid battery drain, and `flags_health_check: ServerConfigurableFlagsReset updatable crashing detected, resetting flags`:
+  - `timberslide`: Crashes with `failed to open EC device: cros_ec (os error 2)`.
+  - `hal_desktop_charge_control_default`: Crashes with `Failed to initialize EC device: /dev/cros_ec`.
+  - `suspend_notification_service`: Crashes with exit code 1.
+  - `udsattestation`: Calling missing Titan C / Google Security Chip (`IGsc`).
+* **Root Cause:** Standard laptops (Lenovo, Dell, HP, Asus) do not have Google ChromeOS Embedded Controller hardware (`/dev/cros_ec`) or Titan C chips.
+* **Solution:** In `hook.sh`, remove `/tmp/sysinit/timberslide.rc` and `/tmp/sysinit/udsattestation.rc` and bind-mount `/tmp/empty.rc` over `/new/vendor/etc/init/hal_desktop_charge_control_default.rc` and `/new/vendor/etc/init/suspend_notification_service.rc`.
+
+### Finding 8: High RAM Usage (Duplicate Apps in Headless User 0)
+* **Symptom:** gbOS86 uses 7–8 GB of RAM immediately upon boot even when idle.
+* **Root Cause:** Googlebook OS operates a dual-user architecture: **User 0** (headless system user) and **User 10** (interactive desktop user). By default, Android spawns full background instances of `com.google.android.gms`, `com.android.vending` (Play Store), `Gboard`, `Chrome`, `Android System Intelligence`, etc. in **both** User 0 and User 10, consuming ~3 GB of RAM solely on redundant, headless background duplicates. Additionally, the Debian Terminal app VM (`crosvm`) reserves 1.6–4 GB.
+* **Solution:** Run an automated post-boot optimization script (`gbos/optimize.sh`) to tune hardware and game compat settings.
+
+### Finding 9: Mouse & Touchpad Input Latency / Jitter
+* **Symptom:** Mouse or touchpad cursor intermittently lags, stutters, or feels sluggish.
+* **Root Causes:**
+  1. **Touchpad:** Android's gesture engine defaults to `Change_Timeout = 0.20` (200ms delay), dropping fast flicks.
+  2. **CPU Scaling Governor (`powersave`):** On Intel Core Ultra (Meteor Lake / Arrow Lake), the default `powersave` governor clocks E-cores and LP E-cores down to ~400 MHz when idle. Moving the mouse triggers interrupt handling on low-frequency cores, creating noticeable micro-stutter before frequencies ramp up.
+  3. **USB Power Autosuspend:** Linux defaults to autosuspending USB optical and wireless mice after 2 seconds. Resuming motion causes a wake-up lag.
+  4. **Hardware Composer Log Spam:** `vendor.hwcomposer-3` floods logcat with `V drmhwc: Missing optional LOG_GAMMA_LUT property` 60 times per second (at 60 FPS), causing frame pacing jitter in SurfaceFlinger.
+  5. **Intel Arc Panel Replay:** Enabled by default in the `xe` driver, causing cursor frame drops on modern panels.
+* **Solution:**
+  - Install `Vendor_2808_Product_0106.idc` into `/data/system/devices/idc/` with `gestureProp.Change_Timeout = 0.02`.
+  - Set `XE_PARAMS="enable_psr=0 enable_fbc=0 enable_panel_replay=0"` in `gbos.cfg`.
+  - Pass `usbcore.autosuspend=-1` in kernel commandline.
+  - Set CPU energy performance preference to `balance_performance`.
+  - Suppress drmhwc verbosity: `setprop persist.log.tag.drmhwc WARN`.
+
+### Finding 10: Heavy ARM64 Games (Pokémon UNITE) ANR on Launch & Minimize
+* **Symptom:** When opening Pokémon UNITE (`jp.pokemon.pokemonunite`), the game hangs for 30–40 seconds with high CPU usage (780% across 8 cores) and triggers an `Application Not Responding (ANR)` crash dialog. When minimized, `BLASTSyncEngine` times out and freezes input.
+* **Root Cause:** Pokémon UNITE is compiled strictly for `arm64-v8a` and uses Tencent ACE / MTP anti-cheat (`libanogs.so`). On initial startup on an x86 PC running Houdini/ndk-translation, runtime JIT compilation of split APKs exceeds deadlines. In desktop mode, window transitions halt Unity render loops.
+* **Solution:** Enable Android App Compat overrides and pre-compile the app into native speed mode:
+  ```bash
+  am compat enable OVERRIDE_ENABLE_COMPAT_FAKE_FOCUS jp.pokemon.pokemonunite
+  am compat enable SKIP_ACTIVITY_RECREATION_ON_CONFIG_CHANGE jp.pokemon.pokemonunite
+  am compat enable OVERRIDE_EXCLUDE_CAPTION_INSETS_FROM_APP_BOUNDS jp.pokemon.pokemonunite
+  cmd game set --fps 60 jp.pokemon.pokemonunite
+  cmd game mode custom jp.pokemon.pokemonunite
+  cmd package compile -m speed jp.pokemon.pokemonunite
+  ```
+
+### Finding 11: USB Flash Drive I/O Stalls and Write Wear
+* **Symptom:** Periodic micro-stutters and hitching when running from USB flash drives (like Samsung Fit Plus).
+* **Root Cause:** Upstream `hook.sh` configured `gbos_logcat` with `-n 99` (writing 100 MB of rotating logs to the USB stick every boot) while `gbos_sync` called `sync` every 5 seconds, causing NAND write queue stalls.
+* **Solution:** Reduced log rotation to `-n 10` (10 MB total) in `hook.sh`, reducing flash write cycles by 90%.
 
 ---
 
@@ -351,6 +390,9 @@ cd ~/work/gbosx86
 | `findfs: unable to resolve 'LABEL=GBOSSYS'` | Stage0 emergency shell | Partition volume label is missing or partition is formatted incorrectly. | Re-label partitions: `fatlabel /dev/sda3 GBOSSYS`, `e2label /dev/sda4 GBOS_META`, `e2label /dev/sda5 GBOS_DATA`. |
 | Wi-Fi or Audio not working | `/gbos/logs/boot-N/hwdetect.txt` | Module path has trailing `+` mismatch (`6.18.21-gbos-whl+`). | Copy module tree to `6.18.21-gbos-whl` on `GBOSSYS`. |
 | Screen freezing or flickering on modern Intel panels | `stage0-dmesg.txt` shows FIFO underrun or PSR errors | Panel Self Refresh (PSR) or Framebuffer Compression (FBC) incompatibility. | Add `enable_psr=0 enable_fbc=0` to `XE_PARAMS` in `gbos.cfg`. |
+| Game ANR / freeze on minimize (Pokémon UNITE) | `logcat.txt` shows `BLASTSyncEngine` timeout and `Waited 5000ms for MotionEvent` | Unity render loop halts during desktop window container transition. | Enable `OVERRIDE_ENABLE_COMPAT_FAKE_FOCUS` and `SKIP_ACTIVITY_RECREATION_ON_CONFIG_CHANGE`. |
+| Mouse stutter / Touchpad lag | `logcat.txt` shows 60 FPS `Missing optional LOG_GAMMA_LUT property` | Missing IDC flick timeout, CPU downclocking in idle, USB autosuspend. | Set CPU EPP `balance_performance`, install IDC file with `Change_Timeout = 0.02`, and set `persist.log.tag.drmhwc=WARN`. |
+| High RAM consumption (~14-15 GB idle) | `dumpsys meminfo` shows duplicate PIDs for GMS and Chrome | Headless User 0 running duplicate copies of all Google apps. | Add `am force-stop --user 0` to `gbos_optimize` service. |
 
 ---
 

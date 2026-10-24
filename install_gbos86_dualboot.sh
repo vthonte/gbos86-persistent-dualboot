@@ -343,10 +343,15 @@ cp usb/out/BOOTX64.EFI "$MNT_SYS/EFI/BOOT/BOOTX64.EFI"
 cp kernel/out/busybox "$MNT_SYS/busybox"
 [ -f "build/super.img" ] && cp build/super.img build/super.layout "$MNT_SYS/gbos/"
 
-for f in hook.sh aidiag.sh early_patch.sh hwdetect.sh install.sh apex_patch.sh gbos.cfg \
+for f in hook.sh optimize.sh aidiag.sh early_patch.sh hwdetect.sh install.sh apex_patch.sh gbos.cfg \
          crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk; do
     [ -f "usb/$f" ] && cp "usb/$f" "$MNT_SYS/gbos/$f"
 done
+
+# Copy custom repository overlays (optimizations, fixes)
+if [ -d "$SCRIPT_DIR/overlay" ]; then
+    cp -r "$SCRIPT_DIR/overlay/." "$MNT_SYS/gbos/"
+fi
 
 for d in firmware patched audio installer kmod modules surface ksu; do
     if [ -d "usb/$d" ]; then
@@ -370,20 +375,13 @@ if ! grep -q "empty_suw" "$MNT_SYS/gbos/hook.sh" 2>/dev/null; then
     sed -i '/# Fake crossystem/i # Mask SetupWizard APK directories so Android skips initial setup\nmkdir -p /tmp/empty_suw\nfor suw_dir in /new/product/priv-app/*SetupWizard* /new/system_ext/priv-app/*SetupWizard* /new/product/priv-app/*setupwizard* /new/system_ext/priv-app/*setupwizard*; do\n  if [ -d "$suw_dir" ]; then\n    mount --bind /tmp/empty_suw "$suw_dir" \&\& log "hook: masked $suw_dir with empty dir"\n  fi\ndone\n' "$MNT_SYS/gbos/hook.sh"
 fi
 
-# Ensure gbos_skip_setup and update_engine override are registered in hook.sh
+# Ensure gbos_skip_setup is registered in hook.sh
 if ! grep -q "gbos_skip_setup" "$MNT_SYS/gbos/hook.sh" 2>/dev/null; then
     sed -i '/start gbos_audiodiag/i \    start gbos_skip_setup' "$MNT_SYS/gbos/hook.sh"
     cat << 'SUW_EOF' >> "$MNT_SYS/gbos/hook.sh"
 
-# Permanently disable update_engine (system A/B OTA updater) so Google OTAs never run
-service update_engine /system/bin/sh -c "exit 0"
-    user root
-    group root
-    disabled
-    override
-
 # Skip SetupWizard completely and launch desktop
-service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; stop update_engine; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
+service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
     user root
     group root
     seclabel u:r:shell:s0
@@ -391,8 +389,28 @@ service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure
 SUW_EOF
 fi
 
+# Ensure gbos_optimize is registered in hook.sh
+if ! grep -q "gbos_optimize" "$MNT_SYS/gbos/hook.sh" 2>/dev/null; then
+    sed -i '/start gbos_skip_setup/a \    start gbos_optimize' "$MNT_SYS/gbos/hook.sh"
+    cat << 'OPT_EOF' >> "$MNT_SYS/gbos/hook.sh"
+
+# GBOS System, Gaming and RAM Optimization Service
+service gbos_optimize /system/bin/sh /postinstall/gbos/optimize.sh
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+OPT_EOF
+fi
+
+# Disable ChromeOS hardware daemons that crash loop on standard PCs
+sed -i '/rm -f \/tmp\/sysinit\/gscd.rc/a \  rm -f /tmp/sysinit/timberslide.rc\n  rm -f /tmp/sysinit/udsattestation.rc' "$MNT_SYS/gbos/hook.sh" 2>/dev/null || true
+if ! grep -q "hal_desktop_charge_control_default" "$MNT_SYS/gbos/hook.sh" 2>/dev/null; then
+    sed -i '/apgetty.rc && log "hook: apgetty disabled"/a \mount --bind /tmp/empty.rc /new/vendor/etc/init/hal_desktop_charge_control_default.rc 2>/dev/null && log "hook: charge_control disabled"\nmount --bind /tmp/empty.rc /new/vendor/etc/init/suspend_notification_service.rc 2>/dev/null && log "hook: suspend_notification disabled"\nmount --bind /tmp/empty.rc /new/vendor/etc/init/suspend_diagnostics.rc 2>/dev/null && log "hook: suspend_diagnostics disabled"' "$MNT_SYS/gbos/hook.sh"
+fi
+
 # Generic base kernel parameters (universally safe across all x86 PCs)
-EXTRA_CMDLINE="ibt=off i8042.nopnp androidboot.setupwizard.mode=DISABLED"
+EXTRA_CMDLINE="ibt=off i8042.nopnp androidboot.setupwizard.mode=DISABLED usbcore.autosuspend=-1"
 
 # Detect GPU architecture dynamically:
 INTEL_VGA_ID=$(lspci -n 2>/dev/null | grep -E '03[0-9a-f]{2}: 8086:' | awk '{print $3}' | cut -d: -f2 | head -n1 | tr '[:upper:]' '[:lower:]' || true)
@@ -400,8 +418,8 @@ INTEL_VGA_ID=$(lspci -n 2>/dev/null | grep -E '03[0-9a-f]{2}: 8086:' | awk '{pri
 if echo "$CPU_INFO $VGA_INFO" | grep -Ei 'ultra|meteor|lunar|arrow|arc|battlemage|xe' >/dev/null; then
     echo -e "${YELLOW}Detected modern Intel Core Ultra / Arc GPU (PCI ID: ${INTEL_VGA_ID:-unknown}): Configuring xe driver...${NC}"
     sed -i 's/^LOAD_I915=.*/LOAD_I915=0/' "$MNT_SYS/gbos/gbos.cfg"
-    sed -i 's/^#XE_PARAMS=.*/XE_PARAMS="enable_psr=0 enable_fbc=0"/' "$MNT_SYS/gbos/gbos.cfg"
-    sed -i 's/^XE_PARAMS=.*/XE_PARAMS="enable_psr=0 enable_fbc=0"/' "$MNT_SYS/gbos/gbos.cfg"
+    sed -i 's/^#XE_PARAMS=.*/XE_PARAMS="enable_psr=0 enable_fbc=0 enable_panel_replay=0"/' "$MNT_SYS/gbos/gbos.cfg"
+    sed -i 's/^XE_PARAMS=.*/XE_PARAMS="enable_psr=0 enable_fbc=0 enable_panel_replay=0"/' "$MNT_SYS/gbos/gbos.cfg"
     sed -i 's/^EXTRA_SLEEP=.*/EXTRA_SLEEP=2/' "$MNT_SYS/gbos/gbos.cfg"
 
     # Disable i915.ko on modern hardware so coldplug modprobe never attempts to load it
