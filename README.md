@@ -20,21 +20,21 @@ An automated, non-destructive installer, hardware simulation harness, and compre
 
 ---
 
-## 🛠️ Quick Start
+## ⚡ Installation Methods
 
-### 1. Prerequisites (Ubuntu / Debian)
+You can install gbOS86 dual-boot using either method:
+
+### Method 1: Integrated Upstream `build.sh` (Official & Minimal)
+We integrated the dual-boot method directly into the upstream repository build script on branch [`feature/dualboot-method`](https://github.com/vthonte/gbos-x86/tree/feature/dualboot-method):
 ```bash
-sudo apt update
-sudo apt install -y gdisk dosfstools e2fsprogs curl python3 tar xz-utils efibootmgr busybox-static qemu-system-x86
+git clone -b feature/dualboot-method https://github.com/vthonte/gbos-x86.git
+cd gbos-x86
+# Interactive menu (select 3 for dual-boot) or direct flag:
+./build.sh --dualboot --target /dev/sda
 ```
 
-### 2. Identify Target Storage
-```bash
-lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MODEL
-```
-*Identify your target GPT drive with at least ~75 GB unallocated space (e.g. `/dev/sda` or `/dev/sdb`).*
-
-### 3. Run the Automated Installer
+### Method 2: Standalone Automation Toolkit (`install_gbos86_dualboot.sh`)
+For users on Ubuntu/Debian who want an automated one-command installer with safety interlocks, GRUB configuration, and instant QEMU VM testing:
 ```bash
 # Preview operations safely (dry-run mode)
 sudo ./install_gbos86_dualboot.sh --target /dev/sda --dry-run
@@ -45,6 +45,14 @@ sudo ./install_gbos86_dualboot.sh --target /dev/sda
 # Run and immediately test in QEMU hardware simulation
 sudo ./install_gbos86_dualboot.sh --target /dev/sda --test-vm
 ```
+
+---
+
+## 🌿 Repository Branches
+
+* **`feature/dualboot-method`** ([vthonte/gbos-x86](https://github.com/vthonte/gbos-x86/tree/feature/dualboot-method)): Clean, minimal dual-boot integration directly into upstream `build.sh` and `usb/install.sh`.
+* **`feature/full-optimizations`** ([vthonte/gbos-x86](https://github.com/vthonte/gbos-x86/tree/feature/full-optimizations)): Full performance suite including headless User 0 RAM debloating (saving 3 GB RAM), zram swap wear elimination, and gaming/multitasking optimizations.
+* **`main`** ([vthonte/gbos86-persistent-dualboot](https://github.com/vthonte/gbos86-persistent-dualboot)): Standalone host installer, QEMU simulation harness, and technical documentation.
 
 ---
 
