@@ -132,6 +132,16 @@ During hardware implementation and simulation on modern PC hardware (specificall
 * **Root Cause:** Upstream `hook.sh` configured `gbos_logcat` with `-n 99` (writing 100 MB of rotating logs to the USB stick every boot) while `gbos_sync` called `sync` every 5 seconds, causing NAND write queue stalls.
 * **Solution:** Reduced log rotation to `-n 10` (10 MB total) in `hook.sh`, reducing flash write cycles by 90%.
 
+### Finding 12: ChromeOS MMD 24GB zRAM & 8GB Disk Swap on USB Flash Drives
+* **Symptom:** Unnecessary RAM overhead, heavy write wear on USB flash drives, and micro-freezes during memory pressure.
+* **Root Cause:** Google's `mmd` (Memory Management Daemon) automatically creates an 8 GB swap backing file (`loop53`) on the `/data` partition (`GBOS_DATA`) and initializes a 23.8 GB zRAM pool. On a laptop with 16 GB of physical RAM running from a USB drive, swapping to slow USB flash storage degrades responsiveness and damages the flash drive.
+* **Solution:**
+  - Remove `/tmp/sysinit/mmd.rc` in `hook.sh` so `mmd_setup` never initializes swap or loop devices.
+  - Run `swapoff -a` and reset `zram0` in `optimize.sh`.
+  - Set `vm.swappiness=0`, `vm.dirty_background_ratio=5`, and `vm.dirty_ratio=10`.
+  - Stop and disable duplicate client apps in headless User 0 (`pm disable-user --user 0`) to free 2.5–3.0 GB of RAM.
+  - Raise `persist.sys.max_cached_processes=64` to fully support background multitasking in User 10.
+
 ---
 
 ## 3. Storage Layout for Non-Destructive Dual-Boot

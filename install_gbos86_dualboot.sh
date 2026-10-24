@@ -403,8 +403,8 @@ service gbos_optimize /system/bin/sh /postinstall/gbos/optimize.sh
 OPT_EOF
 fi
 
-# Disable ChromeOS hardware daemons that crash loop on standard PCs
-sed -i '/rm -f \/tmp\/sysinit\/gscd.rc/a \  rm -f /tmp/sysinit/timberslide.rc\n  rm -f /tmp/sysinit/udsattestation.rc' "$MNT_SYS/gbos/hook.sh" 2>/dev/null || true
+# Disable ChromeOS hardware daemons and swap that crash loop or stall USB flash drives
+sed -i '/rm -f \/tmp\/sysinit\/gscd.rc/a \  rm -f /tmp/sysinit/timberslide.rc\n  rm -f /tmp/sysinit/udsattestation.rc\n  rm -f /tmp/sysinit/mmd.rc' "$MNT_SYS/gbos/hook.sh" 2>/dev/null || true
 if ! grep -q "hal_desktop_charge_control_default" "$MNT_SYS/gbos/hook.sh" 2>/dev/null; then
     sed -i '/apgetty.rc && log "hook: apgetty disabled"/a \mount --bind /tmp/empty.rc /new/vendor/etc/init/hal_desktop_charge_control_default.rc 2>/dev/null && log "hook: charge_control disabled"\nmount --bind /tmp/empty.rc /new/vendor/etc/init/suspend_notification_service.rc 2>/dev/null && log "hook: suspend_notification disabled"\nmount --bind /tmp/empty.rc /new/vendor/etc/init/suspend_diagnostics.rc 2>/dev/null && log "hook: suspend_diagnostics disabled"' "$MNT_SYS/gbos/hook.sh"
 fi
