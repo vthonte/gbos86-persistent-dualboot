@@ -1,4 +1,4 @@
-# gbOS86 Persistent Dual-Boot Toolkit
+# gbOS86: Dual Boot on USB Device Alongside Full Ubuntu Installation
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: x86_64](https://img.shields.io/badge/Platform-x86__64-orange.svg)]()
