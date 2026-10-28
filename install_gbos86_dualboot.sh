@@ -471,43 +471,14 @@ EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
 if ! grep -q "Googlebook OS (gbOS86)" /etc/grub.d/40_custom 2>/dev/null; then
     cat << EOF >> /etc/grub.d/40_custom
 
-menuentry "Googlebook OS (gbOS86) [Auto-Detected]" --class android --class os {
+menuentry "Googlebook OS (gbOS86)" --class android --class os {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $EFI_UUID
     linux /EFI/gbos/BOOTX64.EFI $EXTRA_CMDLINE
 }
-
-menuentry "Googlebook OS (gbOS86) [Modern Intel Xe Graphics]" --class android --class os {
-    insmod part_gpt
-    insmod fat
-    search --no-floppy --fs-uuid --set=root $EFI_UUID
-    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp module_blacklist=i915 androidboot.setupwizard.mode=DISABLED
-}
-
-menuentry "Googlebook OS (gbOS86) [Legacy Intel i915 Graphics]" --class android --class os {
-    insmod part_gpt
-    insmod fat
-    search --no-floppy --fs-uuid --set=root $EFI_UUID
-    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp androidboot.setupwizard.mode=DISABLED
-}
-
-menuentry "Googlebook OS (gbOS86) [Safe Graphics - nomodeset]" --class android --class os {
-    insmod part_gpt
-    insmod fat
-    search --no-floppy --fs-uuid --set=root $EFI_UUID
-    linux /EFI/gbos/BOOTX64.EFI ibt=off i8042.nopnp nomodeset module_blacklist=i915 androidboot.setupwizard.mode=DISABLED
-}
-
-menuentry "Googlebook OS (gbOS86) [UEFI Chainloader]" --class android --class os {
-    insmod part_gpt
-    insmod fat
-    insmod chain
-    search --no-floppy --fs-uuid --set=root $EFI_UUID
-    chainloader /EFI/gbos/BOOTX64.EFI
-}
 EOF
-    echo "Added gbOS86 menuentries to /etc/grub.d/40_custom."
+    echo "Added single optimal gbOS86 menuentry to /etc/grub.d/40_custom."
 else
     echo "GRUB entry already present in /etc/grub.d/40_custom."
 fi
