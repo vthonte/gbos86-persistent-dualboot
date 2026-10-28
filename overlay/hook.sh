@@ -33,13 +33,20 @@ gbos_bind_patches() {
   done < $G/patched/MANIFEST
   log "hook: PATCH-STATUS $gp_ok applied, $gp_bad not applied"
 }
-# Google's userspace needs AVX: the first instructions of its dynamic linker (__linker_init: vxorps/vmovups ymm) are VEX-encoded,
-# and the kernel's emulator only covers the *newer* extensions (GFNI, VNNI, SHA-NI, ...), not baseline AVX. A CPU without AVX
-# (many Celeron/Pentium/Atom parts) kills init at once ("traps: init[1] trap invalid opcode ... in linker64", then a silent hang).
-# Say so on screen instead. REQUIRE_AVX=0 in gbos.cfg boots anyway.
-if [ "${REQUIRE_AVX:-1}" != 0 ] && ! grep -qw avx ${CPUINFO:-/proc/cpuinfo}; then
-  log "CPU: $(grep -m1 'model name' ${CPUINFO:-/proc/cpuinfo})"
-  fail "this CPU has no AVX, so Google's init cannot run on it (not fixable by drivers). Power off, or type exit to try anyway (REQUIRE_AVX=0 in gbos.cfg skips this check)."
+# Google's userspace needs AVX2: the dynamic linker and bionic libc (__linker_init: vxorps/vmovups ymm, vpbroadcastb)
+# use AVX2 instructions, and the kernel's emulator only covers the newer extensions (GFNI, VNNI, SHA-NI, ...),
+# not baseline AVX/AVX2. A CPU without AVX2 (Celeron/Pentium/Atom, or 2nd/3rd Gen Sandy/Ivy Bridge) kills init
+# with SIGILL (exitcode=0x00000004), leading to a kernel panic. Say so on screen instead.
+# REQUIRE_AVX=0 in gbos.cfg boots anyway.
+if [ "${REQUIRE_AVX:-1}" != 0 ]; then
+  if ! grep -qw avx2 ${CPUINFO:-/proc/cpuinfo}; then
+    log "CPU: $(grep -m1 'model name' ${CPUINFO:-/proc/cpuinfo})"
+    if ! grep -qw avx ${CPUINFO:-/proc/cpuinfo}; then
+      fail "this CPU has no AVX, so Google's init cannot run on it (not fixable by drivers). Power off, or type exit to try anyway (REQUIRE_AVX=0 in gbos.cfg skips this check)."
+    else
+      fail "this CPU lacks AVX2 instruction support (Sandy/Ivy Bridge 2nd/3rd Gen). Google's userspace executes AVX2 (vpbroadcastb) in init/linker64, requiring Intel 4th Gen Haswell / 6th Gen Skylake+ or AMD Zen. Power off, or type exit to try anyway (REQUIRE_AVX=0 in gbos.cfg skips this check)."
+    fi
+  fi
 fi
 
 # zram is a module here (=m in Google's config too); mmd_setup aborts without /sys/block/zram0.
