@@ -1,6 +1,12 @@
 # gbos pre-Android hook: sourced by stage0 just before switch_root (Android root at /new,
 # helpers log/fail/shell and $G=/gbos/gbos available). Edit freely, no kernel rebuild needed.
 
+# Reset one-shot MODE=live back to MODE=ask so subsequent boots prompt the user
+if [ -f "$G/gbos.cfg" ] && grep -q '^MODE=live' "$G/gbos.cfg" 2>/dev/null; then
+  sed -i 's/^MODE=live/MODE=ask/' "$G/gbos.cfg" 2>/dev/null || true
+  sync 2>/dev/null || true
+fi
+
 # Library patches. patched/MANIFEST (written by tools/port_build.py) has one line per patch: kind, the path in the Android root
 # (/new/...), the sha256 of the exact original the patch was made from, and the patched file (relative to gbos/). A patch is
 # bound only over a file with that hash, so a new Google build never gets a stale patch: the line says "NOT patched" and shows
@@ -102,8 +108,8 @@ fi
 # is not Intel's, "software GPU" mode swaps in (a) SwiftShader, a CPU Vulkan driver, over vulkan.intel.so (ro.hardware.vulkan=intel
 # keeps working, no prop change) and (b) a gralloc whose generic linear-buffer backend answers to DRM driver "amdgpu" and which
 # lets the CPU driver lock any buffer (tools/patch_gralloc_amdgpu.py; likewise libgbm.so, tools/patch_libgbm_amdgpu.py).
-# GPU_SOFTWARE in gbos.cfg: auto (default: only when no Intel GPU is present and another GPU driver is bound), 1 (force, even
-# on Intel), 0 (never). SYSFS= and NEWROOT= are only for tools/test_gpu_select.sh.
+# GPU_SOFTWARE in gbos.cfg: auto (default: only when no Intel GPU is present and another GPU driver is bound, or Intel Gen <= 8
+# which lacks Vulkan support in Google's image), 1 (force, even on Intel), 0 (never). SYSFS= and NEWROOT= are only for tools/test_gpu_select.sh.
 GBOS_GRALLOC_SHA=d48536951fd0e9643e71a5c8843e90833ce3e212e182782185470e2fbbfad673
 GBOS_LIBGBM_SHA=64a0f2537a5917822cb3f538dc74229e7ccf4ca45a30265bb97f742678ba294e
 GBOS_VKINTEL_SHA=5c687450523ea9ed9e8d4d9cc98ef4fef6c8d592d46db4bf425ad571dc6f7c73
@@ -126,6 +132,35 @@ gbos_gpu_intel_pci() {
   done
   return 1
 }
+# Checks if an Intel GPU has native Vulkan hardware support in Google's image (Gen 9 Skylake+).
+# Older Intel GPUs (Gen 8 Broadwell, Haswell, Valleyview, Cherryview, Ivy Bridge, Sandy Bridge)
+# are rejected by Google's vulkan.intel.so (devinfo->ver < 9) and must fall back to SwiftShader.
+gbos_gpu_intel_has_vulkan() {
+  [ "${1:-}" = xe ] && return 0
+
+  # Check kernel dmesg for integrated display version (< 9 is Gen 8 or older)
+  _ver=$(dmesg 2>/dev/null | grep -m1 -o 'integrated display version [0-9]*' | awk '{print $4}')
+  if [ -n "$_ver" ] && [ "$_ver" -lt 9 ] 2>/dev/null; then return 1; fi
+  if dmesg 2>/dev/null | grep -qiE 'Found (broadwell|haswell|ivybridge|sandybridge|valleyview|cherryview)'; then return 1; fi
+
+  # Check PCI device IDs of Intel display controllers (legacy Gen <= 8)
+  for _d in ${SYSFS:-/sys}/bus/pci/devices/*; do
+    [ -e "$_d/class" ] || continue
+    case "$(cat "$_d/class" 2>/dev/null)" in 0x03*)
+      [ "$(cat "$_d/vendor" 2>/dev/null)" = 0x8086 ] || continue
+      _dev=$(cat "$_d/device" 2>/dev/null | tr '[A-Z]' '[a-z]')
+      case "$_dev" in
+        0x16*) return 1;; # Broadwell Gen 8
+        0x04*|0x0a*|0x0c*|0x0d*) return 1;; # Haswell Gen 7.5
+        0x0f*|0x22*) return 1;; # Valleyview / Cherryview
+        0x015*|0x016*) return 1;; # Ivy Bridge Gen 7
+        0x010*|0x011*|0x012*) return 1;; # Sandy Bridge Gen 6
+      esac
+      ;;
+    esac
+  done
+  return 0
+}
 # Sets GPU_SW=1 (software rendering wanted) or 0 and logs why. $1 = seconds to wait for a non-Intel driver to bind.
 gbos_gpu_decide() {
   GPU_SW=0
@@ -140,9 +175,27 @@ gbos_gpu_decide() {
       drv=${e#*,}
       case "$drv" in i915|xe) intel=$drv;; *) gbos_gpu_real "$drv" && real="$real ${e%%,*}:$drv";; esac
     done
-    # Intel (bound, or at least present on the PCI bus): leave everything as it is, whatever else is installed.
-    [ -n "$intel" ] && { log "hook: software rendering: off (auto; Intel GPU driver $intel bound)"; return 0; }
-    gbos_gpu_intel_pci && { log "hook: software rendering: off (auto; Intel display controller present)"; return 0; }
+    # Intel (bound, or at least present on the PCI bus): check if supported by image Vulkan driver (Gen 9+)
+    if [ -n "$intel" ]; then
+      if gbos_gpu_intel_has_vulkan "$intel"; then
+        log "hook: software rendering: off (auto; Intel GPU driver $intel bound, Gen 9+ hardware Vulkan supported)"
+        return 0
+      else
+        GPU_SW=1
+        log "hook: software rendering: on (auto; Intel GPU driver $intel bound, but Gen <= 8 lacks Vulkan in image; using SwiftShader)"
+        return 0
+      fi
+    fi
+    if gbos_gpu_intel_pci; then
+      if gbos_gpu_intel_has_vulkan ""; then
+        log "hook: software rendering: off (auto; Intel display controller present)"
+        return 0
+      else
+        GPU_SW=1
+        log "hook: software rendering: on (auto; Intel display controller present, but Gen <= 8 lacks Vulkan in image; using SwiftShader)"
+        return 0
+      fi
+    fi
     [ -n "$real" ] && break
     [ $w -ge ${1:-0} ] && break
     sleep 1; w=$((w+1))
@@ -184,6 +237,39 @@ gbos_gpu_enable() {
 # Let the DRM driver (amdgpu probes for several seconds and loads ~20 firmware files) finish before deciding.
 gbos_gpu_decide ${GPU_WAIT:-25}
 [ "$GPU_SW" = 1 ] && gbos_gpu_enable
+
+# Set up DRM device nodes cleanly before switch_root
+gbos_drm_setup() {
+  mkdir -p -m 0755 /dev/dri
+  for _c in /sys/class/drm/card[0-9]* /sys/class/drm/renderD[0-9]*; do
+    [ -f "$_c/dev" ] || continue
+    _name=${_c##*/}
+    _dev=$(cat "$_c/dev")
+    [ -c "/dev/dri/$_name" ] || mknod -m 0666 "/dev/dri/$_name" c ${_dev%:*} ${_dev#*:}
+  done
+  _prim=
+  for _s in /sys/class/drm/card*-*/status; do
+    [ -f "$_s" ] || continue
+    if grep -q '^connected' "$_s" 2>/dev/null; then
+      _prim=${_s%/status}; _prim=${_prim##*/}; _prim=${_prim%%-*}; break
+    fi
+  done
+  if [ -z "$_prim" ]; then
+    for _c in /sys/class/drm/card[0-9]*; do
+      case ${_c##*/} in card*-*) continue;; esac
+      _drv=$(readlink "$_c/device/driver" 2>/dev/null); _drv=${_drv##*/}
+      case "$_drv" in i915|xe|amdgpu|nouveau|radeon) _prim=${_c##*/}; break;; esac
+    done
+  fi
+  if [ -n "$_prim" ] && [ "$_prim" != "card0" ] && [ -f "/sys/class/drm/$_prim/dev" ]; then
+    _pdev=$(cat "/sys/class/drm/$_prim/dev")
+    rm -f /dev/dri/card0
+    mknod -m 0666 /dev/dri/card0 c ${_pdev%:*} ${_pdev#*:}
+    log "hook: primary display on $_prim ($_pdev), mapped to /dev/dri/card0"
+  fi
+  chmod 0666 /dev/dri/* 2>/dev/null || true
+}
+gbos_drm_setup
 
 # drm.debug=0x04 (KMS only; not ATOMIC, which logs every frame): i915 dumps gamma/CSC mode and range per modeset while
 # drm_hwcomposer first sets up the panel. gbos.rc turns it off at boot_completed. Washed-out colours.
@@ -290,17 +376,9 @@ service gbos_audiodiag /system/bin/sh -c "sleep 60; cd /proc/asound; ( head -n 3
     group root audio
     seclabel u:r:shell:s0
     oneshot
-# A /dev/dri/card0 node with no DRM device behind it (i915 is card1) makes the Widevine HAL abort at start-up ("Failed to open
-# /dev/dri/card0: Permission denied"; Dell Inspiron 14 Plus 7440, issue 17). Point it at card1 and restart the HAL. Does nothing when
-# the kernel has a real card0.
-service gbos_drifix /system/bin/sh -c "[ ! -e /sys/class/drm/card0 ] && [ -e /dev/dri/card1 ] && rm -f /dev/dri/card0 && ln -s /dev/dri/card1 /dev/dri/card0 && setprop sys.gbos_dri_fixed 1"
-    user root
-    group root
-    seclabel u:r:shell:s0
-    oneshot
-    disabled
-on early-boot
-    start gbos_drifix
+# DRM card0 is configured directly in stage0_init before Android init starts.
+on early-init
+    setprop sys.gbos_dri_fixed 1
 on property:sys.gbos_dri_fixed=1
     restart vendor.drm-widevine-hal
 
@@ -498,9 +576,60 @@ fi
 # The Latitude's LG LP133WF6 is an sRGB panel, not wide-gamut/HDR like Google's: with these true,
 # SurfaceFlinger offers DISPLAY_BT2020 and drm_hwcomposer tags eDP as BT.2020 (pale colours; the
 # kernel side is fixed in i915_edp_colorspace.sh). Declare it sRGB-only.
+# Auto-detect optimal UI density from connected screen if unset or auto
+if [ "$DENSITY" = "auto" ] || [ -z "$DENSITY" ]; then
+  DENSITY=
+  for _s in /sys/class/drm/card*-*/status; do
+    [ -f "$_s" ] || continue
+    if grep -q '^connected$' "$_s" 2>/dev/null; then
+      _d=$(dirname "$_s")
+      if [ -f "$_d/modes" ] && [ -s "$_d/modes" ]; then
+        _res=$(head -n1 "$_d/modes" 2>/dev/null | tr -d '\r\n')
+        if [ -n "$_res" ]; then
+          _w=$(echo "$_res" | cut -d'x' -f1)
+          _h=$(echo "$_res" | cut -d'x' -f2)
+          if [ "$_w" -le 1366 ]; then
+            DENSITY=140
+          elif [ "$_w" -le 1600 ]; then
+            DENSITY=160
+          elif [ "$_w" -le 1920 ]; then
+            [ "$_h" -ge 1200 ] && DENSITY=180 || DENSITY=160
+          elif [ "$_w" -le 2560 ]; then
+            DENSITY=220
+          elif [ "$_w" -le 2880 ]; then
+            DENSITY=240
+          else
+            DENSITY=320
+          fi
+          log "hook: auto-detected resolution ${_res}, calculated density: $DENSITY"
+          break
+        fi
+      fi
+    fi
+  done
+fi
 case "$DENSITY" in ''|*[!0-9]*) DENSITY=;; esac
+
+# Auto-detect real laptop device model from DMI if set to auto
+if [ "$DEVICE_MODEL" = "auto" ]; then
+  _prod=$(cat /sys/class/dmi/id/product_name 2>/dev/null | tr -d '\000\r\n' | sed -e 's/[[:space:]]\+/ /g' -e 's/^ *//; s/ *$//')
+  _vend=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null | tr -d '\000\r\n' | sed -e 's/[[:space:]]\+/ /g' -e 's/^ *//; s/ *$//')
+  case "$_prod" in
+    ''|'None'|'Default string'|'System Product Name'|'To be filled by O.E.M.'|'System Version') _prod="" ;;
+  esac
+  if [ -n "$_prod" ]; then
+    case "$_prod" in
+      *"$_vend"*) DEVICE_MODEL="$_prod" ;;
+      *) DEVICE_MODEL="$_vend $_prod" ;;
+    esac
+    DEVICE_MODEL=$(echo "$DEVICE_MODEL" | sed 's/^ *//; s/ *$//')
+    command -v log >/dev/null 2>&1 && log "hook: auto-detected device model: $DEVICE_MODEL"
+  else
+    DEVICE_MODEL=""
+  fi
+fi
 DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_color_display=|^ro.surface_flinger.has_HDR_display='
-[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan="   # blur on the CPU is far too slow
+[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format="   # blur on the CPU is far too slow
 [ -n "$DENSITY" ] && DROP="$DROP|^ro.sf.lcd_density="
 [ -n "$DEVICE_MODEL" ] && DROP="$DROP|^ro.product.model=|^ro.product.vendor.model=|^ro.product.marketname=|^ro.product.vendor.marketname="
 { grep -v -E "$DROP" /new/vendor/build.prop
@@ -509,8 +638,10 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
   if [ "$GPU_SW" = 1 ]; then
     echo "ro.surface_flinger.supports_background_blur=0"
     # drm_hwcomposer picks its backend by DRM driver: i915/xe get "client" (everything composited by SurfaceFlinger), any other
-    # driver "generic", which also tries overlay planes. Unknown driver, so stay on the primary plane like Intel does.
+    # driver "generic", which also tries overlay planes. Disable overlay planes and force GPU scaling so everything composites onto the primary plane.
     echo "ro.vendor.hwc.use_overlay_planes=false"
+    echo "vendor.hwc.drm.use_overlay_planes=0"
+    echo "vendor.hwc.drm.scale_with_gpu=1"
     # Google's vendor build.prop has vendor.hwc.drm.enable_color_pipeline=true: drm_hwcomposer then sets the DRM COLOR_PIPELINE client
     # cap and rejects every plane without a COLOR_PIPELINE property ("Plane[N] does not support COLOR_PIPELINE. Rejecting", then
     # "Primary plane for CRTC not found", "No pipelines available. Creating null-display for headless mode": SurfaceFlinger draws into
@@ -521,6 +652,12 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
     # systemui, launcher, 300+ times; SwiftShader reports queueCount=1, RADV too). OpenGL ES through ANGLE (-> the same Vulkan driver) is
     # what SurfaceFlinger already uses successfully here. Seen on the Ryzen 3 3350U, second logs.
     echo "ro.hwui.use_vulkan=false"
+    # Default composition pixel format: PixelFormat::RGBX_8888 (2). Intel Gen <= 8 (Broadwell, Haswell, Ivybridge)
+    # primary display planes do NOT support DRM_FORMAT_ABGR8888 (AB24 / HAL_PIXEL_FORMAT_RGBA_8888), which causes
+    # drmModeAddFB2 to fail with -EINVAL (-22), producing "drmhwc: could not create drm fb -22" and "SurfaceFlinger:
+    # present failed for display: BAD_DISPLAY (2)" on every frame. RGBX_8888 maps to DRM_FORMAT_XBGR8888 (XB24),
+    # which is natively supported on all Intel display generations, AMD, and CPU rendering.
+    echo "ro.surface_flinger.default_composition_pixel_format=2"
   fi
   if [ -n "$DENSITY" ]; then echo "ro.sf.lcd_density=$DENSITY"; fi
   if [ -n "$DEVICE_MODEL" ]; then
@@ -607,6 +744,51 @@ AC=gbos-hda-pch
 if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
   CARD=$(gbos_audio_card)
   CID=$(echo "$CARD" | sed -n 's/^ *[0-9]* \[\([^] ]*\) *\].*/\1/p'); CNAME=$(echo "$CARD" | sed -n 's/.* - //p')
+  # Free the first id by leaving the GPU HDMI audio unbound, then re-probe the internal card.
+  case "$CID" in *[!A-Za-z0-9]*)
+    CNO=$(echo "$CARD" | sed -n 's/^ *\([0-9][0-9]*\) \[.*/\1/p')
+    BCNO=
+    for _cn in $(sed -n 's/^ *\([0-9][0-9]*\) \[.*/\1/p' /proc/asound/cards); do
+      [ "$_cn" = "$CNO" ] && continue
+      if grep -h '^Codec:' /proc/asound/card$_cn/codec#* 2>/dev/null | grep -qiE 'HDMI|DisplayPort'; then BCNO=$_cn; break; fi
+    done
+    D=/sys/bus/pci/drivers/snd_hda_intel
+    MDEV=$(readlink -f /sys/class/sound/card$CNO/device 2>/dev/null); MDEV=${MDEV##*/}
+    BDEV=$(readlink -f /sys/class/sound/card$BCNO/device 2>/dev/null); BDEV=${BDEV##*/}
+    if [ -n "$BCNO" ] && [ -d $D/$MDEV ] && [ -d $D/$BDEV ] \
+       && echo "$BDEV" > $D/unbind && echo "$MDEV" > $D/unbind && echo "$MDEV" > $D/bind; then
+      CARD=
+      _try=0
+      while [ -z "$CARD" ] && [ "$_try" -lt 20 ]; do
+        CARD=$(gbos_audio_card)
+        [ -n "$CARD" ] || sleep 0.1
+        _try=$((_try + 1))
+      done
+      CID=$(echo "$CARD" | sed -n 's/^ *[0-9]* \[\([^] ]*\) *\].*/\1/p'); CNAME=$(echo "$CARD" | sed -n 's/.* - //p')
+      if [ -n "$CID" ]; then
+        # Stage0 has no hotplug mdev daemon, so rebuild /dev/snd from the post-reprobe sysfs devices.
+        mkdir -p /dev/snd
+        rm -f /dev/snd/*
+        _snd_ok=1
+        for _snd in /sys/class/sound/*; do
+          [ -r "$_snd/dev" ] || continue
+          _snd_name=${_snd##*/}
+          case "$_snd_name" in card[0-9]*) continue;; esac
+          _snd_dev=$(cat "$_snd/dev")
+          _snd_major=${_snd_dev%:*}; _snd_minor=${_snd_dev#*:}
+          case "$_snd_major:$_snd_minor" in *[!0-9:]*|:*) _snd_ok=0; continue;; esac
+          mknod -m 0660 "/dev/snd/$_snd_name" c "$_snd_major" "$_snd_minor" || _snd_ok=0
+        done
+        [ "$_snd_ok" = 1 ] || log "hook: failed to recreate some /dev/snd nodes from sysfs"
+        log "hook: HDMI audio left unbound; internal audio card is '$CARD'"
+      else
+        log "hook: internal audio card did not register after HDMI audio unbind and re-probe"
+      fi
+    else
+      [ -n "$MDEV" ] && [ -d "$D/$MDEV" ] || { [ -n "$MDEV" ] && echo "$MDEV" > $D/bind; }
+      log "hook: could not re-probe internal audio card; HDMI audio may be unavailable"
+    fi;;
+  esac
   mkdir -p /tmp/gbos-audio
   if [ -n "$CID" ] && [ "$CID" != PCH ]; then
     AC=gbos-gen
