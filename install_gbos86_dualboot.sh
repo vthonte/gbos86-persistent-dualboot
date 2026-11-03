@@ -412,34 +412,11 @@ fi
 # Generic base kernel parameters (universally safe across all x86 PCs)
 EXTRA_CMDLINE="ibt=off i8042.nopnp androidboot.setupwizard.mode=DISABLED usbcore.autosuspend=-1"
 
-# Detect GPU architecture dynamically:
-INTEL_VGA_ID=$(lspci -n 2>/dev/null | grep -E '03[0-9a-f]{2}: 8086:' | awk '{print $3}' | cut -d: -f2 | head -n1 | tr '[:upper:]' '[:lower:]' || true)
-
-if echo "$CPU_INFO $VGA_INFO" | grep -Ei 'ultra|meteor|lunar|arrow|arc|battlemage|xe' >/dev/null; then
-    echo -e "${YELLOW}Detected modern Intel Core Ultra / Arc GPU (PCI ID: ${INTEL_VGA_ID:-unknown}): Configuring xe driver...${NC}"
-    sed -i 's/^LOAD_I915=.*/LOAD_I915=0/' "$MNT_SYS/gbos/gbos.cfg"
-    sed -i 's/^#XE_PARAMS=.*/XE_PARAMS="enable_psr=0 enable_fbc=0 enable_panel_replay=0"/' "$MNT_SYS/gbos/gbos.cfg"
-    sed -i 's/^XE_PARAMS=.*/XE_PARAMS="enable_psr=0 enable_fbc=0 enable_panel_replay=0"/' "$MNT_SYS/gbos/gbos.cfg"
-    sed -i 's/^EXTRA_SLEEP=.*/EXTRA_SLEEP=2/' "$MNT_SYS/gbos/gbos.cfg"
-
-    # Disable i915.ko on modern hardware so coldplug modprobe never attempts to load it
-    find "$MNT_SYS/gbos/modules" -name "i915.ko" -exec mv {} {}.disabled \; 2>/dev/null || true
-    if [[ -n "$INTEL_VGA_ID" ]]; then
-        sed -i "/alias pci:v00008086d0000${INTEL_VGA_ID^^}.* i915/d" "$MNT_SYS/gbos/modules/lib/modules/"*/modules.alias 2>/dev/null || true
-        EXTRA_CMDLINE="$EXTRA_CMDLINE module_blacklist=i915 i915.force_probe=!$INTEL_VGA_ID xe.force_probe=$INTEL_VGA_ID"
-    else
-        EXTRA_CMDLINE="$EXTRA_CMDLINE module_blacklist=i915"
-    fi
-elif echo "$VGA_INFO" | grep -Ei 'amd|radeon' >/dev/null; then
-    echo -e "${YELLOW}Detected AMD GPU: Configuring software Vulkan rendering...${NC}"
-    sed -i 's/^LOAD_I915=.*/LOAD_I915=0/' "$MNT_SYS/gbos/gbos.cfg"
-    sed -i 's/^GPU_SOFTWARE=.*/GPU_SOFTWARE=auto/' "$MNT_SYS/gbos/gbos.cfg"
-    sed -i 's/^GPU_VULKAN=.*/GPU_VULKAN=auto/' "$MNT_SYS/gbos/gbos.cfg"
-    EXTRA_CMDLINE="$EXTRA_CMDLINE module_blacklist=i915"
-else
-    echo "Detected standard/legacy Intel GPU: Keeping default i915 driver enabled."
-    sed -i 's/^LOAD_I915=.*/LOAD_I915=1/' "$MNT_SYS/gbos/gbos.cfg"
-fi
+# Configure universal dynamic hardware settings (modalias coldplugging):
+echo "Configuring universal dynamic hardware settings in gbos.cfg..."
+sed -i 's/^LOAD_I915=.*/LOAD_I915=auto/' "$MNT_SYS/gbos/gbos.cfg" 2>/dev/null || true
+sed -i 's/^DENSITY=.*/DENSITY=auto/' "$MNT_SYS/gbos/gbos.cfg" 2>/dev/null || true
+sed -i 's/^DEVICE_MODEL=.*/DEVICE_MODEL=auto/' "$MNT_SYS/gbos/gbos.cfg" 2>/dev/null || true
 
 sync
 umount "$MNT_SYS"
