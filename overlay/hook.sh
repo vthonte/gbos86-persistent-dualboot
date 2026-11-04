@@ -7,6 +7,38 @@ if [ -f "$G/gbos.cfg" ] && grep -q '^MODE=live' "$G/gbos.cfg" 2>/dev/null; then
   sync 2>/dev/null || true
 fi
 
+# Ensure all storage block partition device nodes exist in /dev and define findfs fallback
+# so stage0 reliably mounts persistent /data and /metadata across SATA/NVMe/eMMC controllers.
+findfs() {
+  _arg="$1"
+  _lbl="${_arg#LABEL=}"
+  if [ "$_arg" != "$_lbl" ]; then
+    for _u in /sys/class/block/*/uevent; do
+      [ -f "$_u" ] || continue
+      _dname=$(sed -n 's/^DEVNAME=//p' "$_u" 2>/dev/null)
+      _maj=$(sed -n 's/^MAJOR=//p' "$_u" 2>/dev/null)
+      _min=$(sed -n 's/^MINOR=//p' "$_u" 2>/dev/null)
+      if [ -n "$_dname" ] && [ -n "$_maj" ] && [ -n "$_min" ]; then
+        [ -b "/dev/$_dname" ] || mknod -m 660 "/dev/$_dname" b "$_maj" "$_min" 2>/dev/null
+        _pname=$(sed -n 's/^PARTNAME=//p' "$_u" 2>/dev/null)
+        if [ "$_pname" = "$_lbl" ]; then
+          echo "/dev/$_dname"
+          return 0
+        fi
+      fi
+    done
+  fi
+  /bin/busybox findfs "$@" 2>/dev/null
+}
+for _u in /sys/class/block/*/uevent; do
+  [ -f "$_u" ] || continue
+  _dname=$(sed -n 's/^DEVNAME=//p' "$_u" 2>/dev/null)
+  _maj=$(sed -n 's/^MAJOR=//p' "$_u" 2>/dev/null)
+  _min=$(sed -n 's/^MINOR=//p' "$_u" 2>/dev/null)
+  [ -n "$_dname" ] && [ -n "$_maj" ] && [ -n "$_min" ] && [ ! -b "/dev/$_dname" ] && \
+    mknod -m 660 "/dev/$_dname" b "$_maj" "$_min" 2>/dev/null
+done
+
 # Library patches. patched/MANIFEST (written by tools/port_build.py) has one line per patch: kind, the path in the Android root
 # (/new/...), the sha256 of the exact original the patch was made from, and the patched file (relative to gbos/). A patch is
 # bound only over a file with that hash, so a new Google build never gets a stale patch: the line says "NOT patched" and shows
@@ -642,7 +674,7 @@ if [ "$DEVICE_MODEL" = "auto" ]; then
   fi
 fi
 DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_color_display=|^ro.surface_flinger.has_HDR_display='
-[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^persist.sys.sf.disable_blurs=|^ro.launcher.blur.appLaunch=|^log.tag.drmhwc=|^persist.log.tag.drmhwc=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format=|^debug.renderengine.backend=|^debug.renderengine.graphite=|^debug.renderengine.graphite_desktop_optin=|^debug.renderengine.vulkan=|^ro.hwui.render_ahead=|^ro.surface_flinger.max_frame_buffer_acquired_buffers=|^debug.sf.enable_gl_backpressure="   # blur on the CPU is far too slow
+[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^persist.sys.sf.disable_blurs=|^ro.launcher.blur.appLaunch=|^log.tag.drmhwc=|^persist.log.tag.drmhwc=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format=|^debug.renderengine.backend=|^debug.renderengine.graphite=|^debug.renderengine.graphite_desktop_optin=|^debug.renderengine.vulkan=|^ro.hwui.render_ahead=|^ro.surface_flinger.max_frame_buffer_acquired_buffers=|^debug.sf.enable_gl_backpressure=|^dalvik.vm.jitthreshold=|^dalvik.vm.dex2oat-threads=|^dalvik.vm.boot-dex2oat-threads="   # blur on the CPU is far too slow
 [ -n "$DENSITY" ] && DROP="$DROP|^ro.sf.lcd_density="
 [ -n "$DEVICE_MODEL" ] && DROP="$DROP|^ro.product.model=|^ro.product.vendor.model=|^ro.product.marketname=|^ro.product.vendor.marketname="
 { grep -v -E "$DROP" /new/vendor/build.prop
@@ -701,6 +733,14 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
     echo "ro.surface_flinger.max_frame_buffer_acquired_buffers=2"
     echo "debug.sf.enable_gl_backpressure=0"
     echo "debug.sf.rounded_corner_opaque_optimization=true"
+    # ART JIT & dex2oat tuning:
+    # Stock vendor build.prop has dalvik.vm.jitthreshold=5000, forcing methods to run in the
+    # slow bytecode interpreter 5,000 times before JIT compilation. Lowering this to 1000
+    # accelerates cold app startup. Limiting dex2oat threads to 2 prevents background
+    # compilation from starving foreground UI threads on 2-core / 4-thread CPUs.
+    echo "dalvik.vm.jitthreshold=1000"
+    echo "dalvik.vm.dex2oat-threads=2"
+    echo "dalvik.vm.boot-dex2oat-threads=2"
   fi
   if [ -n "$DENSITY" ]; then echo "ro.sf.lcd_density=$DENSITY"; fi
   if [ -n "$DEVICE_MODEL" ]; then
